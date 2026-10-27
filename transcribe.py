@@ -22,7 +22,10 @@ next to this script (gitignored), or set in the environment. See README.md for
 the one-time privacy setup (opt out of ElevenLabs' model training).
 """
 
-import fcntl
+try:
+    import fcntl
+except ImportError:  # Windows: no fcntl; see claim_library and _full_sync
+    fcntl = None
 import hashlib
 import http.client
 import json
@@ -47,6 +50,12 @@ from pathlib import Path
 
 if sys.version_info < (3, 9):
     raise SystemExit(f"Reel needs Python 3.9 or newer; {sys.executable} is {sys.version.split()[0]}")
+if sys.platform == "win32":  # consoles and pipes there default to cp1252, and Reel prints ⚠, ⚙, …
+    for _stream in (sys.stdout, sys.stderr):
+        try:
+            _stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError):
+            pass
 ROOT = Path(__file__).resolve().parent
 # Local settings and secrets: KEY=value lines in .env next to this script
 # (gitignored) — ELEVENLABS_API_KEY and ANTHROPIC_API_KEY, which ⚙ SETTINGS
@@ -252,8 +261,22 @@ def _mix_slots():
     one core and a few hundred MB, so up to 3 on a Mac with the cores and memory
     for it (18 cores / 64 GB → 3; 8 cores / 16 GB → 2; 8 GB → 1)."""
     try:
-        mem_gb = int(subprocess.run(["sysctl", "-n", "hw.memsize"], capture_output=True, text=True,
-                                    timeout=5).stdout) / 2**30
+        if sys.platform == "win32":
+            import ctypes
+
+            class MemoryStatus(ctypes.Structure):
+                _fields_ = [("dwLength", ctypes.c_ulong), ("dwMemoryLoad", ctypes.c_ulong),
+                            ("ullTotalPhys", ctypes.c_ulonglong), ("ullAvailPhys", ctypes.c_ulonglong),
+                            ("ullTotalPageFile", ctypes.c_ulonglong), ("ullAvailPageFile", ctypes.c_ulonglong),
+                            ("ullTotalVirtual", ctypes.c_ulonglong), ("ullAvailVirtual", ctypes.c_ulonglong),
+                            ("ullAvailExtendedVirtual", ctypes.c_ulonglong)]
+            ms = MemoryStatus(dwLength=ctypes.sizeof(MemoryStatus))
+            if not ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(ms)):
+                raise OSError("GlobalMemoryStatusEx failed")
+            mem_gb = ms.ullTotalPhys / 2**30
+        else:
+            mem_gb = int(subprocess.run(["sysctl", "-n", "hw.memsize"], capture_output=True, text=True,
+                                        timeout=5).stdout) / 2**30
     except (OSError, ValueError, subprocess.SubprocessError):
         mem_gb = 8
     return max(1, min(3, (os.cpu_count() or 4) // 4, int(mem_gb // 8)))
@@ -680,7 +703,10 @@ def denoise_item(item_id):
         with tempfile.TemporaryDirectory(dir=d) as tmp:
             tmp = Path(tmp)
             wav = tmp / "in.wav"
-            if src.suffix.lower() == ".wav" and mt.WavData(src).rate == mt.MIX_RATE:
+            info = mt.WavData(src) if src.suffix.lower() == ".wav" else None
+            # deep-filter reads 16-bit and float WAVs only: a 24-bit recorder file (DJI's
+            # 24-bit mode) panics it ("TooWide"), so anything else is decoded to float first
+            if info and info.rate == mt.MIX_RATE and (info.tag, info.bits) in ((1, 16), (3, 32)):
                 shutil.copy2(src, wav)
             else:
                 mt.decode_to_wav(src, wav)
@@ -2995,9 +3021,46 @@ def _set_import(key, entry):
 CLEARED = {}  # volume -> {"copied", "cleared", "kept"} after it was done, while it stays plugged in
 
 
+def _mounted_volumes():
+    """Where removable drives are mounted: the folders in /Volumes on a Mac, the
+    drive roots (D:\\, E:\\, …) on Windows."""
+    if sys.platform == "win32":
+        import ctypes
+        mask = ctypes.windll.kernel32.GetLogicalDrives()
+        return [Path(f"{chr(65 + i)}:\\") for i in range(26) if mask >> i & 1 and chr(65 + i) not in "AB"]
+    return list(VOLUMES.iterdir()) if VOLUMES.is_dir() else []
+
+
+def _volume_name(path):
+    """A volume's own name, for messages: its folder in /Volumes, its drive ("D:") on Windows."""
+    return path.name or path.drive
+
+
+def _external_volume_windows(path):
+    """_external_volume on Windows: the disk's model name ("Wireless Mic Tx")
+    of a USB or SD drive, else None. Only removable drives are asked about."""
+    import ctypes
+    if ctypes.windll.kernel32.GetDriveTypeW(str(path)) != 2:  # DRIVE_REMOVABLE
+        return None
+    ps = ("$d = Get-Partition -DriveLetter %s -ErrorAction Stop | Get-Disk; "
+          "@{FriendlyName=$d.FriendlyName; BusType=[string]$d.BusType} | ConvertTo-Json") % path.drive[0]
+    try:
+        out = subprocess.run(["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", ps],
+                             capture_output=True, text=True, timeout=20,
+                             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)).stdout
+        info = json.loads(out)
+    except Exception:
+        return None
+    if info.get("BusType") not in ("USB", "SD", "MMC"):
+        return None
+    return " ".join((info.get("FriendlyName") or "").split()) or _volume_name(path)
+
+
 def _external_volume(path):
     """The media name ("Mic Tx") of a local external/removable volume, else None
     (the startup disk, network shares, disk images)."""
+    if sys.platform == "win32":
+        return _external_volume_windows(path)
     import plistlib
     try:
         out = subprocess.run(["diskutil", "info", "-plist", str(path)], capture_output=True, timeout=20).stdout
@@ -3016,7 +3079,8 @@ def _volume_recorder_files(root):
     folder down (DJI keeps them in TX_MIC…/)."""
     found = []
     try:
-        dirs = [root] + [d for d in root.iterdir() if d.is_dir() and not d.name.startswith(".")]
+        dirs = [root] + [d for d in root.iterdir() if d.is_dir() and not d.name.startswith(".")
+                         and d.name not in ("System Volume Information", "$RECYCLE.BIN")]  # Windows' own
         for d in dirs:
             found += [f for f in d.iterdir() if f.is_file() and not f.name.startswith(".")
                       and RECORDER_FILE_RE.match(f.name)]
@@ -3089,8 +3153,12 @@ def _reel_copies(name):
 
 def _full_sync(path):
     """Make a file's data — or, for a folder, the names in it — durable on disk:
-    on macOS plain fsync stops at the drive's cache, F_FULLFSYNC goes through."""
-    fd = os.open(path, os.O_RDONLY)
+    on macOS plain fsync stops at the drive's cache, F_FULLFSYNC goes through.
+    Windows can't open a folder this way, nor needs to: NTFS journals the names
+    in it, and fsync (FlushFileBuffers) already goes through the drive's cache."""
+    if sys.platform == "win32" and os.path.isdir(path):
+        return
+    fd = os.open(path, os.O_RDWR if sys.platform == "win32" else os.O_RDONLY)  # Windows flushes only writable handles
     try:
         try:
             fcntl.fcntl(fd, fcntl.F_FULLFSYNC)
@@ -3195,7 +3263,7 @@ def import_volume(root, media):
     new_takes = [f for f in takes if f in new]
     if not new and not clear:
         return True
-    key = f"{media} ({root.name})"
+    key = f"{media} ({_volume_name(root)})"
 
     def phase(name, k, total, file="", hold=True):
         _set_import(key, {"phase": name, "file": file, "done": k, "total": total, "hold": hold})
@@ -3241,7 +3309,8 @@ def import_volume(root, media):
                 cleared += 1
             except OSError as err:
                 print(f"  import: couldn't delete {f.name} from {media}: {err}")
-        os.sync()
+        if hasattr(os, "sync"):  # not on Windows, where removable drives aren't write-cached by default
+            os.sync()
         now = time.time()
         _update_import_log({f.name: {"cleared": now} for f in doomed if f.name in log})
         kept_takes = [f for f in takes if f in keep]
@@ -3281,7 +3350,7 @@ def volume_watcher():
     while True:
         try:
             mounted = {}
-            for v in (VOLUMES.iterdir() if VOLUMES.is_dir() else []):
+            for v in _mounted_volumes():
                 if v.is_symlink() or v.name.startswith("."):
                     continue
                 try:
@@ -3292,7 +3361,7 @@ def volume_watcher():
                 if key not in mounted:
                     media = done.pop(key)  # unplugged: next time it's plugged in, look again
                     with INBOX_LOCK:
-                        CLEARED.pop(f"{media} ({Path(key[0]).name})", None)
+                        CLEARED.pop(f"{media} ({_volume_name(Path(key[0]))})", None)
             for key in list(retry_at):
                 if key not in mounted:
                     retry_at.pop(key, None)
@@ -3807,12 +3876,21 @@ class Handler(BaseHTTPRequestHandler):
             self.close_connection = True
 
 
+class Server(ThreadingHTTPServer):
+    # On Windows SO_REUSEADDR lets a second server bind a port another one is
+    # listening on (and TIME_WAIT never blocks a bind there anyway): leave it off.
+    allow_reuse_address = sys.platform != "win32"
+
+
 def find_port(start):
     for port in range(start, start + 50):
         with socket.socket() as s:
-            # Match HTTPServer's allow_reuse_address so a just-closed server's
-            # TIME_WAIT socket doesn't push us onto a different port.
-            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            if sys.platform == "win32":  # fail on a port anyone holds (see Server)
+                s.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+            else:
+                # Match HTTPServer's allow_reuse_address so a just-closed server's
+                # TIME_WAIT socket doesn't push us onto a different port.
+                s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             try:
                 s.bind(("127.0.0.1", port))
                 return port
@@ -3884,7 +3962,15 @@ def claim_library():
     files it was given to the first, opens its page and exits."""
     lock = open(DATA / ".reel.lock", "a+")
     try:
-        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        if fcntl:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        else:
+            import msvcrt
+            lock.seek(2**30)  # lock a byte past the end, so the address stays readable
+            try:
+                msvcrt.locking(lock.fileno(), msvcrt.LK_NBLCK, 1)
+            except PermissionError:
+                raise BlockingIOError
     except BlockingIOError:  # held: another Reel runs here
         lock.seek(0)
         url = lock.read().strip()
@@ -4095,14 +4181,14 @@ def main():
                     s["status"] = "waiting"
             inbox_process(force=True)
         threading.Thread(target=inbox_watcher, daemon=True).start()
-        if AUTO_IMPORT and sys.platform == "darwin":
+        if AUTO_IMPORT and sys.platform in ("darwin", "win32"):
             threading.Thread(target=volume_watcher, daemon=True).start()
 
     if not api_key():
         print("\n⚠  No ElevenLabs API key yet: add it in ⚙ SETTINGS on the page that opens (see README.md).\n")
 
     port = find_port(DEFAULT_PORT)
-    server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
+    server = Server(("127.0.0.1", port), Handler)
     url = f"http://127.0.0.1:{port}"
     lock.seek(0)
     lock.truncate()

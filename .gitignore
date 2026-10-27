@@ -21,3 +21,4 @@ bin/*.tar.gz
 
 __pycache__/
 .DS_Store
+bin/deep-filter.exe

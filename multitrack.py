@@ -264,6 +264,9 @@ def _tool(name):
     local = Path(__file__).resolve().parent / "bin" / name
     if local.is_file() and os.access(local, os.X_OK):
         return str(local)
+    local = local.with_name(name + ".exe")  # Windows
+    if os.name == "nt" and local.is_file():
+        return str(local)
     return shutil.which(name)
 
 

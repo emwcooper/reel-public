@@ -30,7 +30,8 @@ even when the recording is rebuilt, e.g. when another mic is added.
 ## Getting started
 
 Reel is made for macOS (it uses macOS's built-in `afconvert` for audio; on
-Linux, installing `ffmpeg` should stand in for it, untested). You need:
+Linux, installing `ffmpeg` should stand in for it, untested). It runs on
+Windows too: see [On Windows](#on-windows). You need:
 
 - **Python 3.9 or newer.** The one that comes with macOS is fine: type
   `python3` in Terminal, and if it isn't there yet macOS offers to install the
@@ -67,6 +68,52 @@ Terminal, run `claude`, and paste
 
 It installs what's missing, starts Reel, has you paste your keys into the
 page (Claude never sees them) and runs a test transcription.
+
+## On Windows
+
+Reel runs on Windows 10 and 11, mic import and clearing included (tested on
+Windows 11 with a DJI Mic 3). What's different from the Mac:
+
+- **Setup.** Install Python 3.9 or newer (`winget install Python.Python.3.13`,
+  or python.org) and git (`winget install Git.Git`), then, in PowerShell:
+
+  ```
+  git clone <this repository's URL> reel
+  cd reel
+  powershell -ExecutionPolicy Bypass -File bin\setup.ps1
+  python transcribe.py
+  ```
+
+  `bin\setup.ps1` installs **ffmpeg** (through winget), **numpy** and
+  **DeepFilterNet**. ffmpeg is needed here, not optional: Windows has no
+  `afconvert`, and ffmpeg does its job (decoding recordings for mixing and
+  denoising, encoding the mix). Open a new terminal after it's installed so
+  it's on PATH. Commands are `python`, not `python3`; recordings live in
+  `%USERPROFILE%\Reel Recordings`.
+- **Plugging in the mics.** A DJI Mic 3 hands its recordings over through the
+  charging case: transmitters in, lid shut, case on USB-C. Each transmitter
+  shows up as a drive of its own (D:, E:, …, the disk named "Wireless Mic Tx"),
+  and Reel picks up any removable USB or SD drive with recorder files on it,
+  just as it does `/Volumes` on a Mac. Copying, checking and **CLEAR THE MIC
+  AFTER COPYING** work the same: a file is deleted from the mic only once Reel
+  holds a byte-identical copy of it on another disk. Only removable drives are
+  looked at; a transmitter that shows up as a fixed disk isn't, so copy its
+  files into the inbox by hand.
+- **Google Drive.** Drive for desktop puts your Drive on a drive letter (G:
+  by default, with `My Drive` at its top) or, in mirror mode, in
+  `%USERPROFILE%\My Drive`; Reel finds either. Drive for desktop has to be
+  running and signed in for the folder to be there.
+- **Test audio**, in place of macOS's `say`:
+
+  ```
+  Add-Type -AssemblyName System.Speech
+  $s = New-Object System.Speech.Synthesis.SpeechSynthesizer
+  $s.SetOutputToWaveFile("$env:TEMP\reel-test.wav"); $s.Speak("This is a test of Reel transcription."); $s.Dispose()
+  ```
+- **Smaller things.** Editing a recording copies its audio in full where a Mac
+  makes an instant APFS clone, so it briefly takes more disk. In Windows
+  PowerShell 5, `curl` is another command: use `curl.exe` for the API
+  examples.
 
 ## Several recorders, one conversation (multi-mic)
 

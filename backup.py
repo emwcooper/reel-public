@@ -71,6 +71,15 @@ def drive_folders():
     for old in [*sorted(Path("/Volumes").glob("GoogleDrive*/My Drive")), home / "Google Drive"]:
         if old.is_dir():
             found.append(old)
+    if os.name == "nt":
+        # Drive for desktop on Windows: streamed as a drive letter (G: by default) with
+        # My Drive at its top, or mirrored into a My Drive folder in the home folder.
+        for letter in "DEFGHIJKLMNOPQRSTUVWXYZ":
+            try:
+                found += [d for d in Path(f"{letter}:/").iterdir() if d.is_dir() and d.name in MY_DRIVE]
+            except OSError:
+                continue
+        found += [home / n for n in sorted(MY_DRIVE) if (home / n).is_dir()]
     return [str(p) for p in found]
 
 

@@ -1,4 +1,4 @@
-# Setting up Reel on someone's Mac — instructions for Claude
+# Setting up Reel on someone's Mac (or Windows PC) — instructions for Claude
 
 You are helping someone set up Reel, a local app that transcribes recordings
 (through ElevenLabs) and shows them in the browser, word by word. README.md
@@ -19,6 +19,43 @@ Ground rules:
   `http://127.0.0.1:8765` (the next free port if that one is taken; the
   startup line says which), bound to localhost, so nobody else on the network
   can reach it.
+
+## On Windows
+
+The steps are the same; what changes (README.md → On Windows has the rest):
+
+- **Tools.** `python` (not `python3`) and `git`: if missing, have them run
+  `! winget install Python.Python.3.13` and `! winget install Git.Git`, then
+  open a new terminal. Clone into `%USERPROFILE%\reel`.
+- **Extras (step 2)** are `powershell -ExecutionPolicy Bypass -File bin\setup.ps1`,
+  and on Windows they are not optional: it installs **ffmpeg** (via winget),
+  which stands in for macOS's `afconvert`, plus numpy and DeepFilterNet. Your
+  shell won't see ffmpeg on PATH until it's restarted: add its folder to PATH
+  for the background Reel, or start Reel from a new terminal.
+- **Opening the page** is `start http://127.0.0.1:<port>`. In Windows
+  PowerShell 5, `curl` is another command: use `curl.exe`. Python's console
+  output needs no setup (Reel switches it to UTF-8 itself).
+- **Test audio (step 4)**, in place of `say`:
+
+      Add-Type -AssemblyName System.Speech
+      $s = New-Object System.Speech.Synthesis.SpeechSynthesizer
+      $s.SetOutputToWaveFile("$env:TEMP\reel-test.wav"); $s.Speak("This is a test of Reel transcription."); $s.Dispose()
+
+  then `python transcribe.py --no-browser $env:TEMP\reel-test.wav`.
+- **ElevenLabs keys with restricted permissions** need **Speech to Text** (Reel
+  uses it to transcribe and to delete each transcript afterwards); give it
+  **User: read** too, or Reel can't check the key when it's saved. A key
+  without Speech to Text is accepted in ⚙ SETTINGS but every transcription
+  fails with HTTP 401.
+- **Google Drive (step 5).** Drive for desktop must be running and signed in:
+  it then shows your Drive as a drive letter (G: by default), and Reel finds
+  `G:\My Drive` by itself. No letter means Drive for desktop isn't running
+  (start "Google Drive" from the Start menu) or isn't signed in.
+- **Mics.** A DJI Mic 3 hands its files over through the charging case
+  (transmitters in, lid shut, case on USB-C): each transmitter appears as a
+  removable drive named "Wireless Mic Tx". Recording to the transmitters is
+  its own button on each transmitter (solid red light while recording); the
+  receiver keeps nothing Reel can import.
 
 ## 1. Tools and the code
 
